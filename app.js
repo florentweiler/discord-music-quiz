@@ -7,16 +7,15 @@ const conf = require('./conf.json');
 const { exec } = require('child_process');
 const { spawn } = require('child_process');
 const client = new Discord.Client();
-
-let persons = {
-    ZODD: '261246570727473152',
-    MEHD: '243462209882161152',
-    MOI: '248538326955458560',
-    BEN: '338688803088629760',
-};
+let brook;
+let joinedChannel = false;
 
 client.once('ready', () => {
     console.log('Ready!');
+    client.fetchUser(conf.me).then((res)=>{
+       brook = res;
+       // console.log(brook.voiceChannel);
+    });
 });
 
 client.login(conf["bot-token"]);
@@ -29,6 +28,15 @@ let playableTracks = [];
 let gameIsOn = false;
 const matchDlFile = /Converting (.*) to mp3/;
 const brookFolder = 'S:/brook-list/';
+
+let trackName;
+let artist;
+let dispatcher;
+let countDown;
+
+let scores = {};
+
+let trackCount = 0;
 
 function requestToken(cb) {
     request(
@@ -82,31 +90,14 @@ function getPlayListTracks(cb) {
             }
         }
         , function (error, response, body) {
-            const result = JSON.parse(body);
-            tracks = result.items.map(i => ({id: i.track.id, name: i.track.name, artist: i.track.artists.map(a => a.name).join(" ") }));
-            // console.log(JSON.stringify(tracks));
+            let result = JSON.parse(body);
+            result.items.sort((a,b) =>  (a.track.popularity < b.track.popularity));
+            // console.log(result);
+            tracks = result.items.map(i => ({id: i.track.id, name: i.track.name, artist: i.track.artists.map(a => a.name).join(" "), pop: i.track.popularity }));
+            tracks.sort((a,b) =>  (+a.pop < +b.pop));
+            console.log(tracks);
+            console.log(JSON.stringify(tracks));
             cb();
-        }
-    );
-}
-
-function getTrackInfos(id, cb) {
-    request(
-        {
-            method: 'GET',
-            uri: 'https://api.spotify.com/v1/tracks/' + id,
-            headers: {
-                'Authorization':  `Bearer ${spotifyToken}`
-            }
-        }
-        , function (error, response, body) {
-            // console.log(body);
-
-            // const result = JSON.parse(body);
-            // const random50 = Math.floor(Math.random() * 50);
-            // randomPlaylist = result.playlists.items[random50];
-            // console.log(randomPlaylist.name + ' is the chosen one');
-            // cb();
         }
     );
 }
@@ -117,8 +108,8 @@ function startGame(cb) {
 }
 
 function downLoad5FirstTracks(cb) {
-    const firstThreeTracks = tracks.slice(0,5);
-    async.eachSeries(firstThreeTracks, (track, cbEach) => {
+    const firstFiveTracks = tracks.slice(0,3);
+    async.eachSeries(firstFiveTracks, (track, cbEach) => {
         exec(`spotdl --song https://open.spotify.com/track/${track.id} -f S:/brook-list`, (err, stdout, stderr) => {
             if (err) {
                 console.log(err);
@@ -140,59 +131,119 @@ function downLoad5FirstTracks(cb) {
 
 }
 
+function playNextTrack(connection, channel) {
+    let nextTrack = tracks[trackCount];
+    trackCount++;
+    exec(`spotdl --song https://open.spotify.com/track/${nextTrack.id} -f S:/brook-list`, (err, stdout, stderr) => {
+        if (err) {
+            playNextTrack(connection, channel);
+            return;
+        }
+        const fileNameSearch = matchDlFile.exec(stderr);
+        if(fileNameSearch){
+            const filename = fileNameSearch[1].replace('.m4a','.mp3');
+            nextTrack.file = filename;
+            playTracks(nextTrack, connection, channel, () => {
+                playNextTrack(connection, channel);
+            });
+        } else {
+            playNextTrack(connection, channel);
+        }
+    });
+}
+
+
+function playTracks(track, connection, channel, cb) {
+
+    channel.send('Guess this ! ');
+    dispatcher = connection.playFile(brookFolder + track.file);
+    trackName = track.name.toLowerCase();
+    artist = track.artist.toLowerCase();
+
+    dispatcher.on('end', () => {
+        cb();
+    });
+}
+
 function generatePlaylist(cb) {
     async.series([
         cbSer => requestToken(cbSer),
         cbSer => searchRandomPlaylist(cbSer),
         cbSer => getPlayListTracks(cbSer),
-        cbSer => downLoad5FirstTracks(cbSer),
-        cbSer => startGame(cbSer),
     ], ()=>{
         cb();
     });
 }
 
-function playTracks(connection) {
-    async.eachSeries(playableTracks, (track, cbEach) => {
-        const dispatcher = connection.playFile(brookFolder + track.file);
-        dispatcher.on('end', () => {
-            cbEach();
-        })
-    },()=> {
 
-    });
+function updateScores(playerName, score) {
+    if(scores[playerName]) {
+        scores[playerName] += score;
+    } else {
+        scores[playerName] = score;
+    }
+}
+
+function reinitTrack() {
+    trackName = '';
+    artist = '';
 }
 
 function startDiscordListener(){
     client.on('message', message => {
         if(message.content === '/sing-brook'){
-            if (message.member.voiceChannel) {
+            if (message.member.voiceChannel && !joinedChannel) {
                 message.member.voiceChannel.join()
                     .then(connection => { // Connection is an instance of VoiceConnection
+                        joinedChannel = true;
                         message.channel.send('Yo!');
-                        // connection.playArbitraryInput('https://open.spotify.com/playlist/7nWLr7ueGPIjP6Guk9TIc8');
                         generatePlaylist(()=> {
-                            message.channel.send('Guess this ! ');
-                            playTracks(connection);
-                            // console.log('about to play : ' + brookFolder + playableTracks[0].file);
-                            // const dispatcher = connection.playFile(brookFolder + playableTracks[0].file);
+                            playNextTrack(connection, message.channel);
                         });
                     })
                     .catch(console.log);
+            } else if (joinedChannel) {
+                message.reply('Je suis déjà dans un channel sorry bro.');
             } else {
                 message.reply('Yohohoho! Va dans un channel vocal pour que je te rejoigne!');
+            }
+        } else if(message.content.startsWith('/song ')) {
+            let answer = message.content.replace('/song ', '');
+            if(answer.toLowerCase() === trackName) {
+                message.reply('Nice job! you got the track name for 1 point');
+                updateScores(message.author.username, 1);
+                clearTimeout(countDown);
+                let displayScore = '';
+                Object.keys(scores).forEach((key) => {
+                    displayScore += key + ' has ' + scores[key] + ' ';
+                });
+                message.channel.send('Score is : ' + displayScore);
+                reinitTrack();
+                dispatcher.end();
+            } else {
+                message.reply('Nope, not : ' + answer);
+            }
+        } else if(message.content.startsWith('/singer ')) {
+            let answer = message.content.replace('/singer ', '');
+            if(answer.toLowerCase() === artist) {
+                message.reply('Nice job! you got the singer for 0.5 point');
+                updateScores(message.author.username, 0.5);
+                clearTimeout(countDown);
+                let displayScore = '';
+                Object.keys(scores).forEach((key) => {
+                    displayScore += key + ' has ' + scores[key] + ' ';
+                });
+                message.channel.send('Score is : ' + displayScore);
+                reinitTrack();
+                dispatcher.end();
+            } else {
+                message.reply('Nope, not : ' + answer);
             }
         }
         console.log(`${message.author.id} is ${message.author.username}`);
     });
 }
 
-requestToken(()=>{
-    startDiscordListener();
-});
 
 
-// generatePlaylist(()=> {
-//     const stream = fs.createReadStream(brookFolder + tracks[0].file);
-//     connection.playStream(stream);
-// });
+startDiscordListener();
